@@ -2,21 +2,20 @@ import torch
 
 class QKVCache:
     """
-    A class to store the key-value pairs for the QKV attention mechanism. 
-    
-    The cache uses pre-allocated tensors to store the key-value pairs 
+    A class to store the key-value pairs for the QKV attention mechanism.
+
+    The cache uses pre-allocated tensors (pages) to store the key-value pairs.
     """
     def __init__(self, batch_size, num_heads, head_dim, page_size, max_pages, device=None):
         """
-        Args: 
-        - batch_size: Number of sequences in the batch
-        - num_heads: Number of attention heads
-        - head_dim: Dimension of each attention head
-        - page_size: Number of tokens stored in each page
-        - max_pages: Maximum number of pages to store
-        - device: Device to store the cache tensors (default: cuda if available, mps if available, else cpu)
+        Args:
+            batch_size: Number of sequences in the batch.
+            num_heads: Number of attention heads.
+            head_dim: Dimension of each attention head.
+            page_size: Number of tokens stored in each page.
+            max_pages: Maximum number of pages to store.
+            device: Device to store the cache tensors (default: cuda if available, mps if available, else cpu).
         """
-
         self.batch_size = batch_size
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -32,46 +31,42 @@ class QKVCache:
         self.key_pages = []
         self.value_pages = []
 
-        self.current_length = 0 # Number of tokens stored in the cache
+        self.current_length = 0  # Total number of tokens stored in the cache
         self.current_page_index = -1 
-        self.current_offset = 0 # Offset in the current page
+        self.current_offset = 0  # Offset in the current page
 
         self._allocate_new_page()
 
     def _allocate_new_page(self):
         """
-        Private method to allocate a new page of key-value pairs
+        Allocate a new page of key-value pairs.
         """
         # Allocate a new page (a tensor of shape [batch_size, num_heads, page_size, head_dim])
         key_page = torch.empty(self.batch_size, self.num_heads, self.page_size, self.head_dim, device=self.device)
         value_page = torch.empty(self.batch_size, self.num_heads, self.page_size, self.head_dim, device=self.device)
         self.key_pages.append(key_page)
         self.value_pages.append(value_page)
-        self.current_page_index += len(self.key_pages) - 1
+        self.current_page_index = len(self.key_pages) - 1
         self.current_offset = 0
 
     def add(self, key, value):
         """
-        Adds a key-value pair to the cache. Both key and value should have the same shape.
+        Adds key-value pairs to the cache.
 
         Args:
-        - key: A tensor of shape [batch_size, num_heads, seq_len, head_dim]. seq_len is the length of new tokens to be added
-        - value: A tensor of shape [batch_size, num_heads, seq_len, head_dim]. seq_len is the length of new tokens to be added
-
-        Returns:
-        - None
+            key: Tensor of shape [batch_size, num_heads, seq_len, head_dim].
+            value: Tensor of shape [batch_size, num_heads, seq_len, head_dim].
 
         Raises:
-        - AssertionError: If the shape of key and value tensors do not match
-        - ValueError: If the cache is full
+            AssertionError: If key and value shapes do not match.
+            ValueError: If the cache is full.
         """
-
         assert key.shape == value.shape, "Key and value tensors must have the same shape"
 
         num_tokens = key.size(2)
         token_offset = 0
 
-        #Process the new tokens in chunks so that they fit in the current page
+        # Process new tokens in chunks that fit into the current page.
         while token_offset < num_tokens:
             remaining_space = self.page_size - self.current_offset
             token_to_copy = min(remaining_space, num_tokens - token_offset)
@@ -79,10 +74,12 @@ class QKVCache:
             current_key_page = self.key_pages[self.current_page_index]
             current_value_page = self.value_pages[self.current_page_index]
 
-            # Copy tokens into the current page at the right offset
-            current_key_page[:, :, self.current_offset:self.current_offset + token_to_copy, :] = key[:, :, token_offset:token_offset + token_to_copy, :]
-            current_value_page[:, :, self.current_offset:self.current_offset + token_to_copy, :] = value[:, :, token_offset:token_offset + token_to_copy, :]
-            
+            # Copy tokens into the current page at the correct offset.
+            current_key_page[:, :, self.current_offset:self.current_offset + token_to_copy, :] = \
+                key[:, :, token_offset:token_offset + token_to_copy, :]
+            current_value_page[:, :, self.current_offset:self.current_offset + token_to_copy, :] = \
+                value[:, :, token_offset:token_offset + token_to_copy, :]
+
             self.current_offset += token_to_copy
             self.current_length += token_to_copy
             token_offset += token_to_copy
@@ -95,24 +92,24 @@ class QKVCache:
                 
     def get_cache(self):
         """
-        Retrieves the full key and value caches as a tuple of contiguous tensors
-        The pages are concatenated along the seq_len (sequence) dimension
+        Retrieves the full key and value caches as contiguous tensors.
+        The pages are concatenated along the sequence dimension.
 
         Returns:
-        - A tuple of two tensors: (key_cache, value_cache) 
+            A tuple (key_cache, value_cache).
         """
         key_list = []
         value_list = []
 
-        # All pages except the last one should be full
+        # All pages except the last one are fully filled.
         for i in range(len(self.key_pages) - 1):
             key_list.append(self.key_pages[i])
             value_list.append(self.value_pages[i])
 
-        # The last page should only have tokens until the current offset
+        # The last page contains tokens only up to current_offset.
         key_list.append(self.key_pages[-1][:, :, :self.current_offset, :])
         value_list.append(self.value_pages[-1][:, :, :self.current_offset, :])
 
         key_cache = torch.cat(key_list, dim=2)
         value_cache = torch.cat(value_list, dim=2)
-        return (key_cache, value_cache)
+        return key_cache, value_cache

@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-
 from qkv import QKVCache
 
 class PagedAttention(nn.Module):
@@ -18,53 +17,38 @@ class PagedAttention(nn.Module):
             )
         )
 
-        # Linear projection layers for queries, keys, and values
-        self.q_proj = nn.Linear(num_heads * head_dim, num_heads * head_dim)
-        self.k_proj = nn.Linear(num_heads * head_dim, num_heads * head_dim)
-        self.v_proj = nn.Linear(num_heads * head_dim, num_heads * head_dim)
+        # We assume that the query is precomputed externally.
+        # Therefore, we remove internal q_proj, k_proj, and v_proj layers.
         self.out_proj = nn.Linear(num_heads * head_dim, num_heads * head_dim)
 
-        # Paged key-value cache will be instantiated per batch
-        self.page_size = page_size
-        self.max_pages = max_pages
-
-    def forward(self,x,cache=None):
+    def forward(self, query, cache=None):
         """
         Args:
-        - x: A tensor of shape [batch_size, seq_len, embed_dim]
-        - cache: Optional QKV cache object, if None, a new cache will be created
+            query: A tensor of shape [batch_size, num_heads, 1, head_dim]
+                   representing the query for the current token.
+            cache: Optional QKVCache object. If None, a new cache is created.
+        
+        Returns:
+            attn_output: The computed attention output with shape [batch_size, 1, num_heads * head_dim].
+            cache: The updated QKVCache object.
         """
-
-        batch_size, seq_len, embed_dim = x.size()
+        batch_size, num_heads, q_len, head_dim = query.size()
 
         if cache is None:
-            cache = QKVCache(batch_size, self.num_heads, self.head_dim, self.page_size, self.max_pages, self.device)
+            cache = QKVCache(batch_size, num_heads, head_dim, self.page_size, self.max_pages, self.device)
 
-        # Compute the linear projections for queries, keys, and values
-        q = self.q_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-
-        cache.add(k, v)
-
-        # Retrieve the cached key-value pairs
+        # Retrieve the cached key-value pairs.
         key_cache, value_cache = cache.get_cache()
 
-        # compute the query for the current token
-        curr_q = q[:, -1:, :, :]
-
-        # Compute the attention scores
-        attn_scores = torch.matmul(curr_q, key_cache.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        # Compute attention scores using the provided query and cached keys.
+        attn_scores = torch.matmul(query, key_cache.transpose(-2, -1)) / math.sqrt(head_dim)
         attn_scores = F.softmax(attn_scores, dim=-1)
 
-        # Compute attention values
-        attn_values = torch.matmul(attn_scores, value_cache)
+        # Compute attention values.
+        attn_values = torch.matmul(attn_scores, value_cache)  # Shape: (batch_size, num_heads, 1, head_dim)
 
-        attn_output = attn_values.transpose(1, 2).reshape(batch_size, 1, self.num_heads * self.head_dim)
+        # Reshape the output to [batch_size, 1, num_heads * head_dim].
+        attn_output = attn_values.transpose(1, 2).reshape(batch_size, 1, num_heads * head_dim)
         attn_output = self.out_proj(attn_output)
 
         return attn_output, cache
-
-
-
-    
